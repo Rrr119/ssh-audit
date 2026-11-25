@@ -137,6 +137,11 @@ The TCP port to connect to when auditing a server, or the port to listen on when
 Runs a policy audit against a target using the specified policy (see \fBPOLICY AUDIT\fP section for detailed description of this mode of operation).  Combine with -c/--client-audit to audit a client configuration instead of a server.  Use -L/--list-policies to list all official, built-in policies for common systems.
 
 .TP
+.B     \-\-diff\-policies=<policy1,policy2>
+.br
+Bi-directionally compares two policies (built-in policy names or custom policy file paths, separated by a comma), such as a server-side configuration against a client-side configuration, without connecting to any host.  Exits with code 0 when the policies are identical, or 3 when differences exist.  Supports -j/--json output.
+
+.TP
 .B     \-\-skip\-rate\-test
 .br
 Skips the connection rate test during standard audits.  By default, a few dozen TCP connections are created with the target host to see if connection throttling is implemented (this can safely infer whether the target is vulnerable to the DHEat attack; see CVE-2002-20001).
@@ -180,6 +185,9 @@ By default, \fBssh-audit\fP performs a standard audit.  That is, it enumerates a
 .SH POLICY AUDIT
 .PP
 When the -P/--policy option is used, \fBssh-audit\fP performs a policy audit.  The target's host key types, key exchanges, ciphers, MACs, and other information is compared to a set of expected values defined in the specified policy file.  If everything matches, only a short message stating a passing result is reported.  Otherwise, the field(s) that did not match are reported.
+
+.PP
+Each reported failure identifies the exact non-compliant algorithm or option: text output lists the missing (required by policy), unexpected (not allowed by policy), and reordered algorithms (or the expected versus actual value for scalar options such as banners and key sizes).  In JSON mode, every entry of the \fBerrors\fP array includes an additive \fBdiff\fP object holding these details, while all pre-existing JSON fields remain unchanged for backward compatibility.
 
 .PP
 Policy auditing is helpful for ensuring a group of related servers are properly hardened to an exact specification.

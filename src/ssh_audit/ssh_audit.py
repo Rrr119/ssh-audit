@@ -715,6 +715,49 @@ def list_policies(out: OutputBuffer, verbose: bool) -> None:
     out.write()
 
 
+def compare_policies(out: OutputBuffer, aconf: AuditConf) -> int:
+    '''Bi-directionally compares two policies (typically a server and a client configuration) and renders the result as text or JSON.  Returns exitcodes.GOOD when the policies match, otherwise exitcodes.FAILURE.'''
+
+    if aconf.diff_policies is None or len(aconf.diff_policies) != 2:
+        raise RuntimeError('Internal error: cannot compare policies without two policy paths.')
+
+    first_policy_ref = aconf.diff_policies[0]
+    second_policy_ref = aconf.diff_policies[1]
+
+    policy_a = Policy.load_from_name_or_file(first_policy_ref, json_output=aconf.json)
+    if policy_a is None:
+        out.fail("Error: policy not found: %s" % first_policy_ref, write_now=True)
+        return exitcodes.UNKNOWN_ERROR
+
+    policy_b = Policy.load_from_name_or_file(second_policy_ref, json_output=aconf.json)
+    if policy_b is None:
+        out.fail("Error: policy not found: %s" % second_policy_ref, write_now=True)
+        return exitcodes.UNKNOWN_ERROR
+
+    matched, diff_struct, diff_str = Policy.compare(policy_a, policy_b)
+
+    if aconf.json:
+        json_struct = {
+            'first_policy': policy_a.get_name_and_version(),
+            'second_policy': policy_b.get_name_and_version(),
+            'matched': matched,
+            'differences': diff_struct
+        }
+        out.info(json.dumps(json_struct, indent=4 if aconf.json_print_indent else None, sort_keys=True))
+    else:
+        out.head("Policy Comparison:\n")
+        out.info("First policy:  %s" % policy_a.get_name_and_version())
+        out.info("Second policy: %s" % policy_b.get_name_and_version())
+        out.info("Result: ", line_ended=False)
+        if matched:
+            out.good("Policies are identical")
+        else:
+            out.fail("Policies differ!")
+            out.warn("\nDifferences:\n%s" % diff_str)
+
+    return exitcodes.GOOD if matched else exitcodes.FAILURE
+
+
 def make_policy(aconf: AuditConf, banner: Optional['Banner'], kex: Optional['SSH2_Kex'], client_host: Optional[str]) -> None:
 
     # Set the source of this policy to the server host if this is a server audit, otherwise set it to the client address.
@@ -782,6 +825,7 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
     parser.add_argument("-m", "--manual", action="store_true", dest="manual", default=False, help="print the man page (Docker, PyPI, Snap, and Windows builds only)")
     parser.add_argument("-n", "--no-colors", action="store_true", dest="no_colors", default=False, help="disable colors (automatic when the NO_COLOR environment variable is set)")
     parser.add_argument("-P", "--policy", action="store", dest="policy", metavar="\"Built-In Policy Name\" / custom_policy.txt", type=str, default=None, help="run a policy test using the specified policy (use -L to see built-in policies, or specify filesystem path to custom policy created by -M)")
+    parser.add_argument("--diff-policies", action="store", dest="diff_policies", metavar="policy1,policy2", type=str, default=None, help="bi-directionally compares two policies (built-in policy names or custom policy file paths, separated by a comma); useful for diffing a server configuration against a client configuration.  Exits with code 0 when identical, or 3 when differences exist")
     parser.add_argument("-p", "--port", action="store", dest="oport", metavar="N", type=int, default=None, help="the TCP port to connect to (or to listen on when -c is used)")
     parser.add_argument("-T", "--targets", action="store", dest="targets", metavar="targets.txt", type=str, default=None, help="a file containing a list of target hosts (one per line, format HOST[:PORT]). Use -p/--port to set the default port for all hosts.  Use --threads to control concurrent scans")
     parser.add_argument("-t", "--timeout", action="store", dest="timeout", metavar="N", type=int, default=5, help="timeout (in seconds) for connection and reading (default: %(default)s)")
@@ -887,6 +931,13 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
         if argument.policy is not None:
             aconf.policy_file = argument.policy
 
+        if argument.diff_policies is not None:
+            diff_policy_paths = [path.strip() for path in argument.diff_policies.split(',')]
+            if len(diff_policy_paths) != 2 or any(len(path) == 0 for path in diff_policy_paths):
+                out.fail("Error: --diff-policies expects exactly two policy names or file paths, separated by a comma (i.e.: policy1,policy2).", write_now=True)
+                sys.exit(exitcodes.UNKNOWN_ERROR)
+            aconf.diff_policies = diff_policy_paths
+
         if argument.targets is not None:
             aconf.target_file = argument.targets
 
@@ -906,7 +957,7 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
         parser.print_help()
         sys.exit(exitcodes.UNKNOWN_ERROR)
 
-    if argument.host == "" and argument.client_audit is False and argument.targets is None and argument.list_policies is False and argument.lookup is None and argument.manual is False and argument.list_hardening_guides is False and argument.get_hardening_guide is None:
+    if argument.host == "" and argument.client_audit is False and argument.targets is None and argument.list_policies is False and argument.lookup is None and argument.manual is False and argument.list_hardening_guides is False and argument.get_hardening_guide is None and argument.diff_policies is None:
         out.fail("target host must be specified, unless -c, -m, -L, -T, --lookup or --list-hardening-guides are used", write_now=True)
         sys.exit(exitcodes.UNKNOWN_ERROR)
 
@@ -914,6 +965,10 @@ def process_commandline(out: OutputBuffer, args: List[str]) -> 'AuditConf':  # p
         return aconf
 
     if aconf.lookup != "":
+        return aconf
+
+    # A policy comparison needs no target host, so skip all host/port processing below.
+    if aconf.diff_policies is not None:
         return aconf
 
     if aconf.list_policies:
@@ -1472,6 +1527,12 @@ def main() -> int:
 
     if aconf.lookup != '':
         retval = algorithm_lookup(out, aconf.lookup)
+        out.write()
+        sys.exit(retval)
+
+    # If two policies were given for a bi-directional comparison, run that and exit (no network connection is needed).
+    if aconf.diff_policies is not None:
+        retval = compare_policies(out, aconf)
         out.write()
         sys.exit(retval)
 

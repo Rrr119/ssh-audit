@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid38806",
+  "B": "/home/dev/feedback/uid38806",
+  "sha": "86330251ea1a632cf8815294350a6f86171b90f0",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "jtesta",
+    "repo": "ssh-audit",
+    "sha": "86330251ea1a632cf8815294350a6f86171b90f0"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "ssh-audit",
+    "cloneUrl": "https://github.com/Rrr119/ssh-audit.git"
+  },
+  "at": "2026-11-25T16:36:26.437Z"
+}

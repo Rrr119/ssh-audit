@@ -48,6 +48,7 @@ class AuditConf:
         self.make_policy = False  # When True, creates a policy file from an audit scan.
         self.policy_file: Optional[str] = None   # File system path to a policy
         self.policy: Optional[Policy] = None  # Policy object
+        self.diff_policies: Optional[List[str]] = None  # Two policy names/paths to bi-directionally compare
         self.timeout = 5.0
         self.timeout_set = False  # Set to True when the user explicitly sets it.
         self.target_file: Optional[str] = None
@@ -96,7 +97,7 @@ class AuditConf:
             if value == -1.0:
                 raise ValueError('invalid timeout: {}'.format(value))
             valid = True
-        elif name in ['ip_version_preference', 'lookup', 'policy_file', 'policy', 'target_file', 'target_list', 'gex_test']:
+        elif name in ['ip_version_preference', 'lookup', 'policy_file', 'policy', 'diff_policies', 'target_file', 'target_list', 'gex_test']:
             valid = True
         elif name == "threads":
             valid, num_threads = True, Utils.parse_int(value)

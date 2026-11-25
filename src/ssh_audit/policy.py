@@ -23,6 +23,7 @@
 """
 import copy
 import json
+import os
 import sys
 
 from typing import Dict, List, Tuple
@@ -226,12 +227,33 @@ class Policy:
         self._name_and_version = "%s (version %s)" % (self._name, self._version)
 
 
-    def _append_error(self, mismatched_field: str, expected_required: Optional[List[str]], expected_optional: Optional[List[str]], actual: List[str]) -> None:
+    def _append_error(self, mismatched_field: str, expected_required: Optional[List[str]], expected_optional: Optional[List[str]], actual: List[str], diff: Optional[Dict[str, Any]] = None) -> None:
         if expected_required is None:
             expected_required = ['']
         if expected_optional is None:
             expected_optional = ['']
-        self._errors.append({'mismatched_field': mismatched_field, 'expected_required': expected_required, 'expected_optional': expected_optional, 'actual': actual})
+        self._errors.append({'mismatched_field': mismatched_field, 'expected_required': expected_required, 'expected_optional': expected_optional, 'actual': actual, 'diff': diff if diff is not None else {}})
+
+
+    @staticmethod
+    def _diff_algorithm_lists(expected: List[str], actual: List[str], subset_and_reordering_allowed: bool, optional: Optional[List[str]] = None) -> Dict[str, List[str]]:
+        '''Computes the per-algorithm differences between an expected policy list and the list observed on the target.  Returns a dict with three keys: 'missing' (required algorithms absent from the target), 'unexpected' (algorithms the target offers but the policy does not allow), and 'reordered' (shared algorithms whose ordering differs; only populated for exact-match policies).'''
+
+        if optional is None:
+            optional = []
+
+        missing = [alg for alg in expected if alg not in actual]
+        unexpected = [alg for alg in actual if (alg not in expected) and (alg not in optional)]
+        reordered: List[str] = []
+
+        # In subset/reordering mode, ordering is allowed to differ and missing algorithms are permitted (the target may implement a stricter subset), so only unexpected algorithms are meaningful.
+        if not subset_and_reordering_allowed:
+            actual_shared_order = [alg for alg in actual if alg in expected]
+            expected_shared_order = [alg for alg in expected if alg in actual]
+            if actual_shared_order != expected_shared_order:
+                reordered = actual_shared_order
+
+        return {'missing': missing, 'unexpected': unexpected, 'reordered': reordered}
 
 
     def _normalize_hostkey_sizes(self) -> None:
@@ -346,7 +368,7 @@ macs = %s
         banner_str = str(banner)
         if (self._banner is not None) and (banner_str != self._banner):
             ret = False
-            self._append_error('Banner', [self._banner], None, [banner_str])
+            self._append_error('Banner', [self._banner], None, [banner_str], {'expected': self._banner, 'actual': banner_str})
 
         # All subsequent tests require a valid kex, so end here if we don't have one.
         if kex is None:
@@ -355,7 +377,8 @@ macs = %s
 
         if (self._compressions is not None) and (kex.server.compression != self._compressions):
             ret = False
-            self._append_error('Compression', self._compressions, None, kex.server.compression)
+            diff = Policy._diff_algorithm_lists(self._compressions, kex.server.compression, False)
+            self._append_error('Compression', self._compressions, None, kex.server.compression, diff)
 
         # If a list of optional host keys was given in the policy, remove any of its entries from the list retrieved from the server.  This allows us to do an exact comparison with the expected list below.
         pruned_host_keys = kex.key_algorithms
@@ -364,17 +387,18 @@ macs = %s
 
         # Check host keys.
         if self._host_keys is not None:
+            hostkey_diff = Policy._diff_algorithm_lists(self._host_keys, kex.key_algorithms, self._allow_hostkey_subset_and_reordering, self._optional_host_keys)
             # If the policy allows subsets and re-ordered algorithms...
             if self._allow_hostkey_subset_and_reordering:
                 for hostkey_t in kex.key_algorithms:
                     if hostkey_t not in self._host_keys:
                         ret = False
-                        self._append_error('Host keys', self._host_keys, self._optional_host_keys, kex.key_algorithms)
+                        self._append_error('Host keys', self._host_keys, self._optional_host_keys, kex.key_algorithms, hostkey_diff)
                         break
             # The policy requires exact matching of algorithms.
             elif pruned_host_keys != self._host_keys:
                 ret = False
-                self._append_error('Host keys', self._host_keys, self._optional_host_keys, kex.key_algorithms)
+                self._append_error('Host keys', self._host_keys, self._optional_host_keys, kex.key_algorithms, hostkey_diff)
 
         # Check host key sizes.
         if self._hostkey_sizes is not None:
@@ -388,7 +412,7 @@ macs = %s
                     if (self._allow_larger_keys and actual_hostkey_size < expected_hostkey_size) or \
                        (not self._allow_larger_keys and actual_hostkey_size != expected_hostkey_size):
                         ret = False
-                        self._append_error('Host key (%s) sizes' % hostkey_type, [str(expected_hostkey_size)], None, [str(actual_hostkey_size)])
+                        self._append_error('Host key (%s) sizes' % hostkey_type, [str(expected_hostkey_size)], None, [str(actual_hostkey_size)], {'expected': expected_hostkey_size, 'actual': actual_hostkey_size})
 
                     # If we have expected CA signatures set, check them against what the server returned.
                     if self._hostkey_sizes is not None and len(cast(str, self._hostkey_sizes[hostkey_type]['ca_key_type'])) > 0 and cast(int, self._hostkey_sizes[hostkey_type]['ca_key_size']) > 0:
@@ -400,60 +424,63 @@ macs = %s
                         # Ensure that the CA signature type is what's expected (i.e.: the server doesn't have an RSA sig when we're expecting an ED25519 sig).
                         if actual_ca_key_type != expected_ca_key_type:
                             ret = False
-                            self._append_error('CA signature type', [expected_ca_key_type], None, [actual_ca_key_type])
+                            self._append_error('CA signature type', [expected_ca_key_type], None, [actual_ca_key_type], {'expected': expected_ca_key_type, 'actual': actual_ca_key_type})
                         # Ensure that the actual and expected signature sizes match.
                         elif (self._allow_larger_keys and actual_ca_key_size < expected_ca_key_size) or \
                              (not self._allow_larger_keys and actual_ca_key_size != expected_ca_key_size):
                             ret = False
-                            self._append_error('CA signature size (%s)' % actual_ca_key_type, [str(expected_ca_key_size)], None, [str(actual_ca_key_size)])
+                            self._append_error('CA signature size (%s)' % actual_ca_key_type, [str(expected_ca_key_size)], None, [str(actual_ca_key_size)], {'expected': expected_ca_key_size, 'actual': actual_ca_key_size})
 
         # Check key exchanges.
         if self._kex is not None:
+            kex_diff = Policy._diff_algorithm_lists(self._kex, kex.kex_algorithms, self._allow_algorithm_subset_and_reordering)
             # If the policy allows subsets and re-ordered algorithms...
             if self._allow_algorithm_subset_and_reordering:
                 for kex_t in kex.kex_algorithms:
                     if kex_t not in self._kex:
                         ret = False
-                        self._append_error('Key exchanges', self._kex, None, kex.kex_algorithms)
+                        self._append_error('Key exchanges', self._kex, None, kex.kex_algorithms, kex_diff)
                         break
                 # If kex-strict-?-v00@openssh.com is in the policy (i.e. the Terrapin vulnerability countermeasure), then it must appear in the server's list, regardless of the "allow_algorithm_subset_and_reordering" flag.
                 if ('kex-strict-s-v00@openssh.com' in self._kex and 'kex-strict-s-v00@openssh.com' not in kex.kex_algorithms) or \
                    ('kex-strict-c-v00@openssh.com' in self._kex and 'kex-strict-c-v00@openssh.com' not in kex.kex_algorithms):
                     ret = False
-                    self._append_error('Key exchanges', self._kex, None, kex.kex_algorithms)
+                    self._append_error('Key exchanges', self._kex, None, kex.kex_algorithms, kex_diff)
 
             # The policy requires exact matching of algorithms.
             elif kex.kex_algorithms != self._kex:
                 ret = False
-                self._append_error('Key exchanges', self._kex, None, kex.kex_algorithms)
+                self._append_error('Key exchanges', self._kex, None, kex.kex_algorithms, kex_diff)
 
         # Checking Ciphers
         if self._ciphers is not None:
+            cipher_diff = Policy._diff_algorithm_lists(self._ciphers, kex.server.encryption, self._allow_algorithm_subset_and_reordering)
             # If the policy allows subsets and re-ordered algorithms...
             if self._allow_algorithm_subset_and_reordering:
                 for cipher_t in kex.server.encryption:
                     if cipher_t not in self._ciphers:
                         ret = False
-                        self._append_error('Ciphers', self._ciphers, None, kex.server.encryption)
+                        self._append_error('Ciphers', self._ciphers, None, kex.server.encryption, cipher_diff)
                         break
             # The policy requires exact matching of algorithms.
             elif kex.server.encryption != self._ciphers:
                 ret = False
-                self._append_error('Ciphers', self._ciphers, None, kex.server.encryption)
+                self._append_error('Ciphers', self._ciphers, None, kex.server.encryption, cipher_diff)
 
         # Checking MACs
         if self._macs is not None:
+            mac_diff = Policy._diff_algorithm_lists(self._macs, kex.server.mac, self._allow_algorithm_subset_and_reordering)
             # If the policy allows subsets and re-ordered algorithms...
             if self._allow_algorithm_subset_and_reordering:
                 for mac_t in kex.server.mac:
                     if mac_t not in self._macs:
                         ret = False
-                        self._append_error('MACs', self._macs, None, kex.server.mac)
+                        self._append_error('MACs', self._macs, None, kex.server.mac, mac_diff)
                         break
             # The policy requires exact matching of algorithms.
             elif kex.server.mac != self._macs:
                 ret = False
-                self._append_error('MACs', self._macs, None, kex.server.mac)
+                self._append_error('MACs', self._macs, None, kex.server.mac, mac_diff)
 
         if self._dh_modulus_sizes is not None:
             dh_modulus_types = list(self._dh_modulus_sizes.keys())
@@ -465,7 +492,7 @@ macs = %s
                     if (self._allow_larger_keys and actual_dh_modulus_size < expected_dh_modulus_size) or \
                        (not self._allow_larger_keys and actual_dh_modulus_size != expected_dh_modulus_size):
                         ret = False
-                        self._append_error('Group exchange (%s) modulus sizes' % dh_modulus_type, [str(expected_dh_modulus_size)], None, [str(actual_dh_modulus_size)])
+                        self._append_error('Group exchange (%s) modulus sizes' % dh_modulus_type, [str(expected_dh_modulus_size)], None, [str(actual_dh_modulus_size)], {'expected': expected_dh_modulus_size, 'actual': actual_dh_modulus_size})
 
         error_list, error_str = self._get_errors()
         return ret, error_list, error_str
@@ -495,6 +522,19 @@ macs = %s
                 e_str += "    - Expected%s: %s\n" % (subset_and_reordering_parens, Policy._normalize_error_field(e['expected_required']))
                 spacer = '   '
             e_str += "    - Actual:%s%s\n" % (spacer, Policy._normalize_error_field(e['actual']))
+
+            # Append the per-algorithm (or per-option) differences, so auditors can see exactly which entries are non-compliant.  Old clients that only understand the fields above remain fully supported.
+            diff = e.get('diff', {})
+            if len(diff) > 0:
+                if 'expected' in diff and 'actual' in diff:
+                    e_str += "    - Non-compliant option: expected %s, got %s\n" % (diff['expected'], diff['actual'])
+                else:
+                    if len(diff.get('missing', [])) > 0:
+                        e_str += "    - Missing (required by policy): %s\n" % ', '.join(diff['missing'])
+                    if len(diff.get('unexpected', [])) > 0:
+                        e_str += "    - Unexpected (not allowed by policy): %s\n" % ', '.join(diff['unexpected'])
+                    if len(diff.get('reordered', [])) > 0:
+                        e_str += "    - Reordered (order differs from policy): %s\n" % ', '.join(diff['reordered'])
             error_list.append(e_str)
 
         error_list.sort()  # To ensure repeatable results for testing.
@@ -570,6 +610,93 @@ macs = %s
         server_policy_descriptions.sort()
         client_policy_descriptions.sort()
         return server_policy_descriptions, client_policy_descriptions
+
+
+    @staticmethod
+    def load_from_name_or_file(policy_name_or_file: str, json_output: bool = False) -> Optional['Policy']:
+        '''Loads a built-in policy by name, or (if no built-in policy with that name exists) loads a custom policy from a file path.  Returns None only when the path does not exist and is not a built-in policy name.'''
+
+        policy = Policy.load_builtin_policy(policy_name_or_file, json_output=json_output)
+        if policy is None:
+            try:
+                if not os.path.isfile(policy_name_or_file):
+                    return None
+                policy = Policy(policy_file=policy_name_or_file, json_output=json_output)
+            except FileNotFoundError:
+                return None
+
+        return policy
+
+
+    @staticmethod
+    def compare(policy_a: 'Policy', policy_b: 'Policy') -> Tuple[bool, List[Dict[str, Any]], str]:
+        '''Performs a bi-directional comparison of two policies (useful for comparing a server-side configuration against a client-side configuration, or two configurations of any kind).  The comparison is symmetric: every algorithm present on only one side is reported, along with ordering differences and mismatched scalar/key-size options.  Returns a tuple of a boolean (True when the two configurations are identical), a list of structured difference entries, and a human-readable string representation.'''
+
+        diffs: List[Dict[str, Any]] = []
+
+        def compare_list(field: str, list_a: Optional[List[str]], list_b: Optional[List[str]]) -> None:
+            if list_a is None and list_b is None:
+                return
+            if list_a is None:
+                list_a = []
+            if list_b is None:
+                list_b = []
+            if list_a == list_b:
+                return
+
+            only_in_a = [alg for alg in list_a if alg not in list_b]
+            only_in_b = [alg for alg in list_b if alg not in list_a]
+            order_differs = False
+            shared_a = [alg for alg in list_a if alg in list_b]
+            shared_b = [alg for alg in list_b if alg in list_a]
+            if shared_a != shared_b:
+                order_differs = True
+
+            diffs.append({'field': field, 'only_in_first': only_in_a, 'only_in_second': only_in_b, 'order_differs': order_differs, 'first': list_a, 'second': list_b})
+
+        def compare_scalar(field: str, value_a: Optional[Any], value_b: Optional[Any]) -> None:
+            if value_a == value_b:
+                return
+            diffs.append({'field': field, 'first': value_a, 'second': value_b})
+
+        def compare_key_sizes(field: str, sizes_a: Optional[Dict[str, Any]], sizes_b: Optional[Dict[str, Any]]) -> None:
+            if sizes_a == sizes_b:
+                return
+
+            sizes_a = sizes_a if sizes_a is not None else {}
+            sizes_b = sizes_b if sizes_b is not None else {}
+            for key_type in sorted(set(list(sizes_a.keys()) + list(sizes_b.keys()))):
+                entry_a = sizes_a.get(key_type)
+                entry_b = sizes_b.get(key_type)
+                if entry_a != entry_b:
+                    diffs.append({'field': '%s: %s' % (field, key_type), 'first': entry_a, 'second': entry_b})
+
+        compare_scalar('Banner', policy_a._banner, policy_b._banner)  # pylint: disable=protected-access
+        compare_list('Compression', policy_a._compressions, policy_b._compressions)  # pylint: disable=protected-access
+        compare_list('Host keys', policy_a._host_keys, policy_b._host_keys)  # pylint: disable=protected-access
+        compare_list('Optional host keys', policy_a._optional_host_keys, policy_b._optional_host_keys)  # pylint: disable=protected-access
+        compare_list('Key exchanges', policy_a._kex, policy_b._kex)  # pylint: disable=protected-access
+        compare_list('Ciphers', policy_a._ciphers, policy_b._ciphers)  # pylint: disable=protected-access
+        compare_list('MACs', policy_a._macs, policy_b._macs)  # pylint: disable=protected-access
+        compare_key_sizes('Host key sizes', policy_a._hostkey_sizes, policy_b._hostkey_sizes)  # pylint: disable=protected-access
+        compare_key_sizes('DH modulus sizes', policy_a._dh_modulus_sizes, policy_b._dh_modulus_sizes)  # pylint: disable=protected-access
+
+        diff_lines: List[str] = []
+        for diff in diffs:
+            diff_lines.append("  * %s differs:" % diff['field'])
+            if 'only_in_first' in diff:
+                if len(diff['only_in_first']) > 0:
+                    diff_lines.append("    - Only in first policy:  %s" % ', '.join(diff['only_in_first']))
+                if len(diff['only_in_second']) > 0:
+                    diff_lines.append("    - Only in second policy: %s" % ', '.join(diff['only_in_second']))
+                if diff['order_differs']:
+                    diff_lines.append("    - Ordering differs: first: %s" % ', '.join(diff['first']))
+                    diff_lines.append("                       second: %s" % ', '.join(diff['second']))
+            else:
+                diff_lines.append("    - First policy:  %s" % diff['first'])
+                diff_lines.append("    - Second policy: %s" % diff['second'])
+
+        return len(diffs) == 0, diffs, "\n".join(diff_lines)
 
 
     @staticmethod

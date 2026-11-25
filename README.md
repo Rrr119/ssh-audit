@@ -34,6 +34,8 @@
 - analyze SSH version compatibility based on algorithm information;
 - historical information from OpenSSH, Dropbear SSH and libssh;
 - policy scans to ensure adherence to a hardened/standard configuration;
+- per-algorithm/per-option compliance details in policy failures (the exact missing, unexpected, or reordered algorithms and mismatched options are named), while keeping the existing text and JSON output fields intact;
+- bi-directional comparison of any two policies (for example a server-side configuration against a client-side configuration) via `--diff-policies`;
 - runs on Linux and Windows;
 - supports Python 3.10 - 3.14;
 - no dependencies
@@ -190,6 +192,14 @@ To create a policy based on a target server (which can be manually edited):
 ssh-audit -M new_policy.txt targetserver
 ```
 
+To bi-directionally compare two policies or configurations (built-in policy names or custom policy file paths, separated by a comma).  This is useful for diffing a server-side baseline against a client-side configuration, or any two captured configurations; exit code is 0 when they match and 3 when differences exist:
+```
+ssh-audit --diff-policies path/to/server_policy.txt,path/to/client_policy.txt
+ssh-audit --diff-policies "Hardened Debian 12 (version 3)","Hardened Debian 13 (version 1)"
+```
+
+Policy failures report the exact non-compliant entries.  In text output, each mismatched section is followed by `Missing (required by policy)`, `Unexpected (not allowed by policy)`, and `Reordered (order differs from policy)` lines (or a `Non-compliant option` line for scalar values such as banners and key sizes).  In JSON output, each entry of the `errors` array gains an additive `diff` object (`missing`, `unexpected`, and `reordered` lists, or `expected`/`actual` values); all pre-existing JSON fields are unchanged.
+
 To run the DHEat CPU exhaustion DoS attack ([CVE-2002-20001](https://nvd.nist.gov/vuln/detail/CVE-2002-20001)) against a target using 10 concurrent sockets:
 ```
 ssh-audit --dheat=10 targetserver
@@ -254,6 +264,8 @@ For convenience, a web front-end on top of the command-line tool is available at
 ## ChangeLog
 
 ### v3.9.1-dev
+- Policy failures now identify the exact non-compliant algorithms and options: the `errors` JSON entries include an additive `diff` field (with `missing`, `unexpected`, and `reordered` algorithm lists, or `expected`/`actual` scalar values), and text output lists each offending entry; existing output fields and formatting remain unchanged.
+- Added `--diff-policies` option to bi-directionally compare two policies or configurations (such as a server baseline against a client configuration), with text and JSON output and an exit code of 3 when differences are found.
  - Added support for Python 3.15.
  - Fixed a perhaps rare crash when performing connection rate tests during standard audits.
  - No longer mark `kexguess2@matt.ucc.asn.au` (pseudo-kex used by Dropbear) as not PQ-safe.
